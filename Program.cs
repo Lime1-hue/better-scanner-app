@@ -8,12 +8,12 @@ internal static class Program
     private static void Main()
     {
         // Single instance: a second launch just brings the running window forward.
-        using var mutex = new Mutex(true, "BetterScanner.SingleInstance", out bool first);
+        using var mutex = new Mutex(true, "BetterScanner.SingleInstance" + AppSettings.ProfileSuffix, out bool first);
         if (!first)
         {
             try
             {
-                using var ev = EventWaitHandle.OpenExisting("BetterScanner.Show");
+                using var ev = EventWaitHandle.OpenExisting("BetterScanner.Show" + AppSettings.ProfileSuffix);
                 ev.Set();
             }
             catch
@@ -23,7 +23,7 @@ internal static class Program
             return;
         }
 
-        using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "BetterScanner.Show");
+        using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "BetterScanner.Show" + AppSettings.ProfileSuffix);
 #if NETFRAMEWORK
         Native.SetProcessDPIAware(); // sharp text on high-DPI screens (Windows 7)
         Application.EnableVisualStyles();

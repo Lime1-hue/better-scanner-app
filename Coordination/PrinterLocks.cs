@@ -40,7 +40,7 @@ public sealed class PrinterLocks : IDisposable
     {
         public string App { get; set; } = "BetterScanner";
         public int V { get; set; } = 1;
-        public string Type { get; set; } = "";       // claim | release | ask
+        public string Type { get; set; } = "";       // claim | release | ask | keep
         public string From { get; set; } = "";
         public string User { get; set; } = "";
         public string Machine { get; set; } = "";
@@ -69,8 +69,10 @@ public sealed class PrinterLocks : IDisposable
 
     /// <summary>Raised (on a background thread) whenever someone takes or releases a printer.</summary>
     public event Action? ClaimsChanged;
-    /// <summary>Someone asked us to release our printer. Argument: who is asking.</summary>
-    public event Action<string>? ReleaseRequested;
+    /// <summary>Someone asked us to release our printer. Arguments: who is asking, their instance id (for <see cref="ReplyKeep"/>).</summary>
+    public event Action<string, string>? ReleaseRequested;
+    /// <summary>The colleague we asked answered "I'm still using it". Argument: who.</summary>
+    public event Action<string>? KeepReplied;
 
     public void Start()
     {
@@ -171,6 +173,9 @@ public sealed class PrinterLocks : IDisposable
 
     public void AskRelease(PrinterClaim c) => Send(new Message { Type = "ask", Target = c.InstanceId });
 
+    /// <summary>Tells a colleague who asked for our printer that we're still using it.</summary>
+    public void ReplyKeep(string askerInstanceId) => Send(new Message { Type = "keep", Target = askerInstanceId });
+
     private void Hold(ScannerInfo s)
     {
         lock (gate)
@@ -255,12 +260,17 @@ public sealed class PrinterLocks : IDisposable
                 lock (gate) changed = claims.Remove(m.From);
                 break;
             case "ask" when m.Target == InstanceId:
-                var who = string.Equals(m.User, m.Machine, StringComparison.OrdinalIgnoreCase) || m.Machine.Length == 0 ? m.User : $"{m.User} ({m.Machine})";
-                ReleaseRequested?.Invoke(who);
+                ReleaseRequested?.Invoke(WhoOf(m), m.From);
+                break;
+            case "keep" when m.Target == InstanceId:
+                KeepReplied?.Invoke(WhoOf(m));
                 break;
         }
         if (changed) ClaimsChanged?.Invoke();
     }
+
+    private static string WhoOf(Message m) =>
+        string.Equals(m.User, m.Machine, StringComparison.OrdinalIgnoreCase) || m.Machine.Length == 0 ? m.User : $"{m.User} ({m.Machine})";
 
     private void Send(Message m)
     {

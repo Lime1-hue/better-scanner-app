@@ -112,15 +112,18 @@ public sealed class HandsFreeEngine
                     continue;
                 }
 
-                idleSince = DateTime.UtcNow; // paper is in the feeder
-
                 if (needEmpty)
                 {
+                    // Paper left behind after a failed scan doesn't count as use, so a
+                    // forgotten jam can't hold the printer forever.
+                    if (IdleTooLong(out var why)) { reason = why; return; }
                     Report(Phase.ClearFeeder, "Take the paper out of the feeder",
                         "The last scan failed. Remove the stack, check it, and put it back to try again.");
                     await Task.Delay(1000, ct);
                     continue;
                 }
+
+                idleSince = DateTime.UtcNow; // fresh paper is in the feeder
 
                 if (!st.IsIdle)
                 {

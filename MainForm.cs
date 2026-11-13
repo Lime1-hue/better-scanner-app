@@ -31,8 +31,21 @@ public sealed class MainForm : Form
     private int sessionStacks, sessionPages;
     private PrinterClaim? shownClaim;      // colleague holding the selected printer (shown in the UI)
     private string? notifyFreeFor;         // printer id to announce when it becomes free
-    private string? stopNote;              // reason to show when we stop the engine ourselves
+    private (string Text, bool Error)? stopNote; // reason to show when we stop the engine ourselves
     private string? updateHiddenFor;       // release tag the user clicked "Later" on (this session only)
+
+    // "Walked away and forgot" protection (see GuardTick).
+    private static readonly TimeSpan AskTimeout = TimeSpan.FromSeconds(60);   // coworker asked, nobody answered → release
+    private static readonly TimeSpan LockedIdle = TimeSpan.FromMinutes(2);    // PC locked and no paper → stop
+    private readonly System.Windows.Forms.Timer guardTimer = new() { Interval = 1000 };
+    private Phase enginePhase = Phase.Stopped;
+    private DateTime lastFeederUse = DateTime.UtcNow; // last time paper was in the feeder (or a scan ran)
+    private DateTime? lockedSince;                     // Windows session locked
+    private DateTime? askedAt;                         // a coworker asked us to release the printer
+    private string askerName = "";
+    private readonly HashSet<string> askerIds = new();
+    private Form? releasePrompt;
+    private Label? releaseCountdown;
 
     private readonly Panel pnlUpdate = new()
     {
@@ -359,8 +372,8 @@ public sealed class MainForm : Form
         settings.PagesPerFile = (int)numPages.Value;
         settings.Duplex = chkDuplex.Checked;
         settings.SkipBlank = chkSkipBlank.Checked;
-        settings.SaveFolder = txtFolder.Text.Trim();
-        settings.FilePrefix = txtPrefix.Text;
+        // SaveFolder / FilePrefix are not read here: they're committed only when the
+        // user finishes editing (CommitFolder / CommitPrefix), never half-typed.
         settings.DailySubfolder = chkDaily.Checked;
         settings.AutoStartHandsFree = chkAutoStart.Checked;
         settings.CloseToTray = chkTray.Checked;
@@ -388,6 +401,50 @@ public sealed class MainForm : Form
         IdleStopMinutes = settings.IdleStopMinutes,
     };
 
+    /// <summary>
+    /// Applies the typed save folder once editing is finished (Leave / Enter / Start).
+    /// Hands-free may be running, so a half-typed or unusable path must never reach
+    /// the scanner: the folder is checked first, and on failure the old one is kept.
+    /// </summary>
+    private bool CommitFolder()
+    {
+        var typed = txtFolder.Text.Trim();
+        if (typed == settings.SaveFolder) return true;
+        try
+        {
+            if (typed.Length > 0 && !IsAbsolutePath(typed))
+                throw new ArgumentException($"\"{typed}\" isn't a full folder path. Use something like D:\\Scans or \\\\server\\share\\Scans.");
+            Directory.CreateDirectory(ScanPipeline.ResolveFolder(new ScanOptions { Folder = typed, DailySubfolder = settings.DailySubfolder }));
+        }
+        catch (Exception ex)
+        {
+            txtFolder.Text = settings.SaveFolder; // revert first, so a re-fired Leave is a no-op
+            ShowFromTray();
+            MessageBox.Show(this,
+                "Can't use that save folder, so scans keep going to the previous one:\n" + settings.SaveFolder + "\n\n" + ex.Message,
+                "Save folder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+        settings.SaveFolder = typed;
+        settings.Save();
+        RebuildOptions();
+        LoadRecent();
+        return true;
+    }
+
+    private void CommitPrefix()
+    {
+        if (txtPrefix.Text == settings.FilePrefix) return;
+        settings.FilePrefix = txtPrefix.Text;
+        settings.Save();
+        RebuildOptions();
+    }
+
+    /// <summary>C:\… or \\server\share\… — not "D:" or "Scans", which resolve against the current directory.</summary>
+    private static bool IsAbsolutePath(string p) =>
+        p.StartsWith(@"\\", StringComparison.Ordinal)
+        || (p.Length >= 3 && char.IsLetter(p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/'));
+
     private void SyncVisibility()
     {
         bool fixedSplit = Val(cboSplit) == "fixed";
@@ -402,9 +459,12 @@ public sealed class MainForm : Form
         numPages.ValueChanged += (_, _) => OnOptionsChanged();
         numIdle.ValueChanged += (_, _) => OnOptionsChanged();
         txtName.TextChanged += (_, _) => OnOptionsChanged();
-        txtPrefix.TextChanged += (_, _) => OnOptionsChanged();
-        txtFolder.TextChanged += (_, _) => OnOptionsChanged();
-        txtFolder.Leave += (_, _) => LoadRecent();
+        // Folder and prefix apply when editing is finished, not per keystroke — hands-free
+        // could otherwise scan a stack into a half-typed path.
+        txtFolder.Leave += (_, _) => CommitFolder();
+        txtPrefix.Leave += (_, _) => CommitPrefix();
+        txtFolder.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; CommitFolder(); } };
+        txtPrefix.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; CommitPrefix(); } };
 
         cboScanner.SelectedIndexChanged += (_, _) =>
         {
@@ -432,18 +492,19 @@ public sealed class MainForm : Form
         {
             if (shownClaim is not { } c) return;
             locks.AskRelease(c);
-            lnkAsk.Text = $"✓ Asked {c.User} — a message popped up on their PC";
+            lnkAsk.Text = $"✓ Asked {c.User}. If nobody answers within a minute, it's freed for you.";
         };
         locks.ClaimsChanged += () => Ui(UpdateLockUi);
-        locks.ReleaseRequested += who => Ui(() =>
+        locks.ReleaseRequested += (who, fromId) => Ui(() => OnReleaseRequested(who, fromId));
+        locks.KeepReplied += who => Ui(() =>
         {
-            if (!engine.IsRunning) return;
-            var printer = SelectedScanner?.Name ?? "the printer";
-            lblSession.ForeColor = Amber;
-            lblSession.Text = $"{who} is asking to use {printer}. Click Stop when you're done.";
-            Notify($"{who} wants to use {printer}", "Click \"Stop hands-free scanning\" when you're done so they can use it.", ToolTipIcon.Info);
-            Sound(SystemSounds.Exclamation);
+            if (shownClaim is null) return;
+            lnkAsk.Text = $"{who} is still using it. Click \"Tell me when it's free\" or ask again later.";
+            Sound(SystemSounds.Asterisk);
         });
+        guardTimer.Tick += (_, _) => GuardTick();
+        guardTimer.Start();
+        Microsoft.Win32.SystemEvents.SessionSwitch += OnSessionSwitch;
         btnRefresh.Click += async (_, _) => await DiscoverAsync(userInitiated: true);
         btnAddIp.Click += async (_, _) => await AddByIpAsync();
         btnBrowse.Click += (_, _) => BrowseFolder();
@@ -465,8 +526,13 @@ public sealed class MainForm : Form
             if (!engine.IsRunning && !glassBusy && Visible) _ = RefreshPrinterStatusAsync();
         };
 
-        engine.StatusChanged += (p, t, d) => Ui(() => ShowPhase(p, t, d));
-        engine.ScanSaved += o => Ui(() => OnScanSaved(o));
+        engine.StatusChanged += (p, t, d) => Ui(() =>
+        {
+            enginePhase = p;
+            if (PaperInFeeder(p)) lastFeederUse = DateTime.UtcNow;
+            ShowPhase(p, t, d);
+        });
+        engine.ScanSaved += o => Ui(() => { lastFeederUse = DateTime.UtcNow; OnScanSaved(o); });
         engine.ScanFailed += m => Ui(() => OnScanFailed(m));
         engine.ScannerMoved += s => Ui(() => { locks.UpdatePrinter(s); MergeScanners([s]); });
         engine.Stopped += (reason, isError) => Ui(() => OnEngineStopped(reason, isError));
@@ -678,7 +744,8 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Pick a printer first (click \"Find printers\").", "Better Scanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (!EnsureFolder()) return;
+        CommitPrefix(); // e.g. started from the tray while still typing: no Leave fired
+        if (!CommitFolder() || !EnsureFolder()) return;
 
         // Coworkers see this name, and office PCs often share one Windows login.
         if (string.IsNullOrWhiteSpace(settings.DisplayName) && Visible)
@@ -710,6 +777,8 @@ public sealed class MainForm : Form
 
         sessionStacks = sessionPages = 0;
         lblSession.Text = "Nothing scanned yet this session";
+        lastFeederUse = DateTime.UtcNow; // locking the PC right after Start still leaves time to walk over
+        enginePhase = Phase.Waiting;
         engine.Start(s, () => options);
         Native.KeepAwake(true);
         SetRunningUi(true);
@@ -741,10 +810,12 @@ public sealed class MainForm : Form
         locks.Release();
         Native.KeepAwake(false);
         SetRunningUi(false);
-        if (stopNote is not null)
+        enginePhase = Phase.Stopped;
+        CloseReleasePrompt();
+        if (stopNote is { } note)
         {
-            reason = stopNote;
-            isError = true;
+            reason = note.Text;
+            isError = note.Error;
             stopNote = null;
         }
         if (reason is not null)
@@ -761,6 +832,183 @@ public sealed class MainForm : Form
         lblSession.Text = SessionText();
         UpdateLockUi();
         _ = RefreshPrinterStatusAsync();
+    }
+
+    // ── Forgotten hands-free (coworker asks / PC locked) ────────────────────
+
+    /// <summary>
+    /// Fresh paper being fed in these phases — proof the owner is at the printer.
+    /// Not Busy (could be the coworker copying) or ClearFeeder (jammed paper left behind).
+    /// </summary>
+    private static bool PaperInFeeder(Phase p) => p is Phase.Settling or Phase.Scanning;
+
+    private string PrinterName => SelectedScanner?.Name ?? "the printer";
+
+    private void OnSessionSwitch(object? sender, Microsoft.Win32.SessionSwitchEventArgs e) => Ui(() =>
+    {
+        switch (e.Reason)
+        {
+            case Microsoft.Win32.SessionSwitchReason.SessionLock:
+            case Microsoft.Win32.SessionSwitchReason.ConsoleDisconnect:
+            case Microsoft.Win32.SessionSwitchReason.RemoteDisconnect:
+                lockedSince ??= DateTime.UtcNow;
+                break;
+            case Microsoft.Win32.SessionSwitchReason.SessionUnlock:
+            case Microsoft.Win32.SessionSwitchReason.ConsoleConnect:
+            case Microsoft.Win32.SessionSwitchReason.RemoteConnect:
+                lockedSince = null;
+                break;
+        }
+    });
+
+    /// <summary>
+    /// Runs every second while the app is open. Frees the printer when its owner has
+    /// clearly walked away: a coworker asked for it and nobody answered within a
+    /// minute, or the PC is locked and no paper has been put in for 2 minutes.
+    /// Paper in the feeder always counts as "still here", so someone scanning a long
+    /// batch at the printer is never cut off.
+    /// </summary>
+    private void GuardTick()
+    {
+        if (!engine.IsRunning)
+        {
+            CloseReleasePrompt();
+            return;
+        }
+        var now = DateTime.UtcNow;
+        if (PaperInFeeder(enginePhase)) lastFeederUse = now;
+
+        if (askedAt is { } asked)
+        {
+            var left = asked + AskTimeout - now;
+            if (lastFeederUse > asked)
+            {
+                KeepPrinter(automatic: true); // they're at the printer feeding paper
+            }
+            else if (left <= TimeSpan.Zero)
+            {
+                stopNote = ($"{askerName} asked to use {PrinterName} and nobody answered within a minute, so it was freed for them.", false);
+                askedAt = null;
+                engine.Stop();
+                return;
+            }
+            else if (releaseCountdown is not null)
+            {
+                releaseCountdown.Text = $"It will be freed for them in {Math.Ceiling(left.TotalSeconds)} seconds unless you keep it.";
+            }
+        }
+
+        if (lockedSince is { } locked)
+        {
+            var since = locked > lastFeederUse ? locked : lastFeederUse;
+            if (now - since > LockedIdle)
+            {
+                stopNote = ($"Stopped because this PC was locked and no paper was put in for {LockedIdle.TotalMinutes:0} minutes, so others can use {PrinterName}.", false);
+                engine.Stop();
+            }
+        }
+    }
+
+    private void OnReleaseRequested(string who, string fromId)
+    {
+        if (!engine.IsRunning) return;
+        askerIds.Add(fromId);
+        askerName = who;
+        askedAt ??= DateTime.UtcNow; // asking again doesn't restart the clock
+        lblSession.ForeColor = Amber;
+        lblSession.Text = $"{who} is asking to use {PrinterName}.";
+        Notify($"{who} wants to use {PrinterName}", "Keep it or free it in the Better Scanner window. It's freed automatically in a minute if nobody answers.", ToolTipIcon.Info);
+        Sound(SystemSounds.Exclamation);
+        ShowReleasePrompt();
+    }
+
+    /// <summary>Small always-on-top window: "Maria wants to use WF-C878R — Free it now / Keep using it".</summary>
+    private void ShowReleasePrompt()
+    {
+        if (releasePrompt is { IsDisposed: false })
+        {
+            releasePrompt.Controls[0].Text = $"{askerName} wants to use {PrinterName}.";
+            return;
+        }
+        var f = new NoFocusForm
+        {
+            Text = "Better Scanner", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.Manual,
+            MinimizeBox = false, MaximizeBox = false, ControlBox = false, ShowInTaskbar = true, Font = Font, Icon = Icon,
+            AutoScaleDimensions = new SizeF(96f, 96f), AutoScaleMode = AutoScaleMode.Dpi, ClientSize = new Size(420, 130),
+        };
+        var title = new Label
+        {
+            Text = $"{askerName} wants to use {PrinterName}.", Left = 14, Top = 14, Width = 392, Height = 26,
+            Font = new Font("Segoe UI Semibold", 11f), AutoEllipsis = true,
+        };
+        var count = new Label { Left = 14, Top = 44, Width = 392, Height = 22, ForeColor = Muted };
+        var free = new Button { Text = "Free it now", Left = 186, Top = 84, Width = 110, Height = 32 };
+        var keep = new Button { Text = "Keep using it", Left = 302, Top = 84, Width = 106, Height = 32 };
+        free.Click += (_, _) =>
+        {
+            stopNote = ($"You freed {PrinterName} for {askerName}.", false);
+            askedAt = null;
+            engine.Stop();
+        };
+        keep.Click += (_, _) => KeepPrinter(automatic: false);
+        f.Controls.AddRange([title, count, free, keep]);
+        releasePrompt = f;
+        releaseCountdown = count;
+        GuardTick(); // fill in the countdown right away
+        if (releasePrompt != f) return;
+
+        // Bottom-right, by the clock: out of the way, and not under the mouse of
+        // someone busy in another program. Buttons wake up after 1.5 s so a click
+        // that was already on its way can't answer it by accident.
+        free.Enabled = keep.Enabled = false;
+        f.Load += (_, _) =>
+        {
+            var area = Screen.PrimaryScreen?.WorkingArea ?? Screen.FromControl(this).WorkingArea;
+            f.Location = new Point(area.Right - f.Width - 12, area.Bottom - f.Height - 12);
+        };
+        var arm = new System.Windows.Forms.Timer { Interval = 1500 };
+        arm.Tick += (_, _) => { arm.Dispose(); if (!f.IsDisposed) free.Enabled = keep.Enabled = true; };
+        f.FormClosed += (_, _) => arm.Dispose();
+        f.Show();
+        arm.Start();
+    }
+
+    /// <summary>
+    /// Pops up on top of everything but doesn't take the keyboard, so someone typing in
+    /// another program can't press a button by accident. Only a mouse click answers it.
+    /// </summary>
+    private sealed class NoFocusForm : Form
+    {
+        protected override bool ShowWithoutActivation => true;
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00000008; // WS_EX_TOPMOST
+                return cp;
+            }
+        }
+    }
+
+    private void KeepPrinter(bool automatic)
+    {
+        foreach (var id in askerIds) locks.ReplyKeep(id);
+        lblSession.ForeColor = Muted;
+        lblSession.Text = automatic
+            ? $"{askerName} asked for {PrinterName}; they were told you're still scanning."
+            : $"You kept {PrinterName}. {askerName} was told you're still using it.";
+        CloseReleasePrompt();
+    }
+
+    private void CloseReleasePrompt()
+    {
+        askedAt = null;
+        askerIds.Clear();
+        var f = releasePrompt;
+        releasePrompt = null;
+        releaseCountdown = null;
+        if (f is { IsDisposed: false }) f.Close();
     }
 
     // ── Printer lock (who is using which printer) ───────────────────────────
@@ -784,7 +1032,7 @@ public sealed class MainForm : Form
             // Two people pressed Start at the same moment: the earlier one keeps it.
             if (locks.LostTo() is { } rival)
             {
-                stopNote = $"{rival.Who} started hands-free on {rival.PrinterName} at the same moment and got it first. Pick another printer, or wait until they're done.";
+                stopNote = ($"{rival.Who} started hands-free on {rival.PrinterName} at the same moment and got it first. Pick another printer, or wait until they're done.", true);
                 engine.Stop();
             }
             return;
@@ -854,7 +1102,14 @@ public sealed class MainForm : Form
         lblSession.ForeColor = Muted;
         lblSession.Text = $"This session: {sessionStacks} stack{(sessionStacks == 1 ? "" : "s")}, {sessionPages} page{(sessionPages == 1 ? "" : "s")} · last: {what}";
 
-        if (o.Warning is not null)
+        if (o.FolderNote is not null)
+        {
+            lblSession.ForeColor = Amber;
+            lblSession.Text += " · saved to a different folder";
+            Notify("Scan saved to a different folder", o.FolderNote + (o.Warning is null ? "" : " " + o.Warning), ToolTipIcon.Warning);
+            Sound(SystemSounds.Exclamation);
+        }
+        else if (o.Warning is not null)
         {
             Notify("Scan partly saved", o.Warning, ToolTipIcon.Warning);
             Sound(SystemSounds.Exclamation);
@@ -907,7 +1162,8 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Pick a printer first (click \"Find printers\").", "Better Scanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (!EnsureFolder()) return;
+        CommitPrefix(); // e.g. started from the tray while still typing: no Leave fired
+        if (!CommitFolder() || !EnsureFolder()) return;
 
         glassBusy = true;
         btnGlass.Enabled = false;
@@ -957,7 +1213,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             txtFolder.Text = dlg.SelectedPath;
-            LoadRecent();
+            CommitFolder();
         }
     }
 
@@ -1147,9 +1403,14 @@ public sealed class MainForm : Form
             return;
         }
 
+        CommitPrefix();
+        CommitFolder(); // a folder typed just before exiting is still saved (or reported)
         engine.Stop();
         locks.Dispose(); // tells coworkers the printer is free right away
         Native.KeepAwake(false);
+        Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch; // static event: must unhook
+        guardTimer.Stop();
+        CloseReleasePrompt();
         statusTimer.Stop();
         updateTimer.Stop();
         tray.Visible = false;
@@ -1164,6 +1425,7 @@ public sealed class MainForm : Form
             tray.Dispose();
             statusTimer.Dispose();
             updateTimer.Dispose();
+            guardTimer.Dispose();
         }
         base.Dispose(disposing);
     }

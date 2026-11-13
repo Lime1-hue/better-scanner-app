@@ -13,7 +13,7 @@ It replaces the Epson Scan 2 routine (open the app → walk to the printer → b
 It doesn't use Epson Scan 2 or any driver. It talks to the printer directly over the network using **eSCL (AirScan)**, which is built into the printers. The scanning engine was ported from an internal document system and turned into a Windows desktop app.
 
 1. **Find printers.** The app sends an mDNS query (`_uscan._tcp`) to discover printers. That still works when DHCP gives a printer a new IP, and the app re-checks automatically if a printer goes quiet.
-2. **Hands-free.** Every second the app checks the feeder's paper sensor (`/eSCL/ScannerStatus` → `AdfState`). When paper has sat there for 3 seconds and the printer is idle, it starts a feeder scan by itself, saves the PDF, and waits for the next stack.
+2. **Hands-free.** Every second the app checks the feeder's paper sensor (`/eSCL/ScannerStatus` → `AdfState`). When paper has sat there for 2 seconds and the printer is idle, it starts a feeder scan by itself, saves the PDF, and waits for the next stack.
    - If the printer is busy (someone is copying), it waits until it's free.
    - If a scan fails (jam), it asks you to take the paper out first, so it doesn't keep re-feeding a stuck sheet. Pages received before the jam are still saved.
    - While it's waiting, the PC is kept from going to sleep.
@@ -67,10 +67,19 @@ The two versions work the same way and see each other's printer locks. Differenc
 Only one person at a time can run hands-free on a printer. While yours is on, your app tells the other copies on the network, every 2 seconds, that you're using it (UDP broadcast on port 47653, no server needed). On other PCs:
 
 - The printer shows **"in use by Maria"** in the list and under it, as soon as the app is opened. Staff see this at their desk, before walking to the printer.
-- The Start button is grayed out, and the panel offers **Use [another printer] instead (free)**, **Tell me when it's free**, and **Ask Maria to release it** (pops up a notification on her PC).
+- The Start button is grayed out, and the panel offers **Use [another printer] instead (free)**, **Tell me when it's free**, and **Ask Maria to release it**.
 - "Scan glass now" still works, since it can't take paper from the feeder.
 
-The printer is freed when you press Stop, close the app, after the auto-stop time with no paper (10 minutes by default), or within about 7 seconds if your PC crashes or drops off the network. If two people press Start at the same moment, the one who pressed first keeps it and the other is told why.
+**Asking for a printer.** "Ask Maria to release it" pops up a small window in the corner of Maria's screen with **Free it now** and **Keep using it**. If nobody answers within **1 minute**, her app frees the printer by itself, because she has probably walked away. If she's at the printer feeding paper, that counts as an answer and she keeps it. Either way the person asking is told.
+
+The printer is freed when:
+- you press Stop or close the app,
+- nobody has put paper in for the auto-stop time (**5 minutes** by default, changeable),
+- **the PC is locked** (Win+L, or locked automatically) and no paper has been put in for **2 minutes**. Locking the PC right after pressing Start is fine: you have 2 minutes to reach the printer, and each stack restarts the clock,
+- a coworker asks and nobody answers within a minute,
+- or within about 7 seconds if your PC crashes or drops off the network.
+
+If two people press Start at the same moment, the one who pressed first keeps it and the other is told why.
 
 Each PC must click **Allow** on the Windows Firewall prompt the first time the app runs, or it won't hear coworkers' locks.
 

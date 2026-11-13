@@ -16,13 +16,14 @@ public sealed class ScanOptions
     public string Folder { get; init; } = "";
     public bool DailySubfolder { get; init; }
     public string Prefix { get; init; } = "Scan";
-    public int SettleSeconds { get; init; } = 3;
+    public int SettleSeconds { get; init; } = 2;
     /// <summary>Hands-free stops by itself after this long with no paper, so the printer is freed for others.</summary>
-    public int IdleStopMinutes { get; init; } = 10;
+    public int IdleStopMinutes { get; init; } = 5;
 }
 
 /// <param name="Warning">Set when the job broke part-way and only some pages were saved.</param>
-public sealed record ScanOutcome(IReadOnlyList<string> Files, int Pages, int SkippedBlank, string? Warning);
+/// <param name="FolderNote">Set when the chosen folder couldn't be written and the scan was saved somewhere else instead.</param>
+public sealed record ScanOutcome(IReadOnlyList<string> Files, int Pages, int SkippedBlank, string? Warning, string? FolderNote = null);
 
 /// <summary>Scan → trim/size pages → write PDF(s) into the chosen folder.</summary>
 public static class ScanPipeline
@@ -51,8 +52,7 @@ public static class ScanPipeline
             var raw = await EsclClient.ScanAsync(scanner.Ip, req, tmp, progress, ct).ConfigureAwait(false);
             progress?.Report($"Saving {raw.Files.Count} page{(raw.Files.Count == 1 ? "" : "s")}…");
 
-            var folder = ResolveFolder(o);
-            var outcome = await Task.Run(() => Assemble(raw.Files, req.Resolution, o, folder, ct), ct).ConfigureAwait(false);
+            var outcome = await Task.Run(() => AssembleWithFallback(raw.Files, req.Resolution, o, ct), ct).ConfigureAwait(false);
             return raw.Error is null
                 ? outcome
                 : outcome with { Warning = $"{raw.Error} The {outcome.Pages} page(s) received before that were saved — check the feeder." };
@@ -70,6 +70,41 @@ public static class ScanPipeline
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Scans")
             : o.Folder;
         return o.DailySubfolder ? Path.Combine(root, DateTime.Now.ToString("yyyy-MM-dd")) : root;
+    }
+
+    /// <summary>
+    /// The pages have already gone through the feeder, so losing them means rescanning.
+    /// If the chosen folder can't be written (network share gone, drive removed, no
+    /// permission), save to Documents\Scans — or the Desktop — instead of failing.
+    /// </summary>
+    private static ScanOutcome AssembleWithFallback(List<string> files, int dpi, ScanOptions o, CancellationToken ct)
+    {
+        var wanted = ResolveFolder(o);
+        var candidates = new[]
+        {
+            wanted,
+            ResolveFolder(new ScanOptions { Folder = "", DailySubfolder = o.DailySubfolder }),
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+        }.Where(f => !string.IsNullOrEmpty(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        Exception? first = null;
+        foreach (var folder in candidates)
+        {
+            try
+            {
+                // A pass-through PDF moved by a failed attempt is no longer in the temp folder.
+                var outcome = Assemble(files.Where(File.Exists).ToList(), dpi, o, folder, ct);
+                return first is null ? outcome : outcome with
+                {
+                    FolderNote = $"Couldn't save to {wanted} ({first.Message}), so it was saved to {folder} instead.",
+                };
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                first ??= e;
+            }
+        }
+        throw first!;
     }
 
     private static ScanOutcome Assemble(List<string> files, int dpi, ScanOptions o, string folder, CancellationToken ct)
