@@ -33,6 +33,10 @@ public sealed class MainForm : Form
     private string? notifyFreeFor;         // printer id to announce when it becomes free
     private (string Text, bool Error)? stopNote; // reason to show when we stop the engine ourselves
     private string? updateHiddenFor;       // release tag the user clicked "Later" on (this session only)
+    private UpdateInfo? pendingUpdate;     // newer release shown in the update bar
+    private bool updating;                 // one-click update in progress
+    private bool restartAfterClose, restartResume; // launch the new version once this window has closed
+    private readonly bool justUpdated, resumeHandsFree;
 
     // "Walked away and forgot" protection (see GuardTick).
     private static readonly TimeSpan AskTimeout = TimeSpan.FromSeconds(60);   // coworker asked, nobody answered → release
@@ -121,8 +125,12 @@ public sealed class MainForm : Form
     private readonly Icon iconIdle = LoadIcon("app.ico"), iconArmed = LoadIcon("app-armed.ico");
     private readonly Icon trayIdle = LoadIcon("app.ico", small: true), trayArmed = LoadIcon("app-armed.ico", small: true);
 
-    public MainForm()
+    /// <param name="justUpdated">Started by the previous version right after a one-click update.</param>
+    /// <param name="resumeHandsFree">Hands-free was on before that update: turn it back on.</param>
+    public MainForm(bool justUpdated = false, bool resumeHandsFree = false)
     {
+        this.justUpdated = justUpdated;
+        this.resumeHandsFree = resumeHandsFree;
         BuildLayout();
         Native.SetPlaceholder(txtName, Environment.UserName);
         LoadSettingsIntoControls();
@@ -193,11 +201,15 @@ public sealed class MainForm : Form
         pnlUpdate.Controls.Add(lnkUpdate);
         lnkUpdate.LinkClicked += (_, e) =>
         {
-            if (e.Link?.LinkData is string url) OpenUrl(url);
+            if (e.Link?.LinkData is "install") _ = InstallUpdateAsync();
             else if (e.Link?.LinkData is "later")
             {
                 updateHiddenFor = lnkUpdate.Tag as string;
                 pnlUpdate.Visible = false;
+            }
+            else if (e.Link?.LinkData is string url)
+            {
+                OpenUrl(url);
             }
         };
         Add(pnlUpdate); // "new version available" bar, hidden until there is one
@@ -683,7 +695,12 @@ public sealed class MainForm : Form
         }
         await RefreshPrinterStatusAsync();
         await DiscoverAsync(userInitiated: false);
-        if (settings.AutoStartHandsFree && !engine.IsRunning && SelectedScanner is not null) StartHandsFree();
+        if ((settings.AutoStartHandsFree || resumeHandsFree) && !engine.IsRunning && SelectedScanner is not null) StartHandsFree();
+        if (justUpdated)
+        {
+            Notify("Better Scanner updated", $"You're now on version {UpdateChecker.Short(UpdateChecker.Current)}."
+                + (resumeHandsFree ? " Hands-free scanning is back on." : ""), ToolTipIcon.Info);
+        }
 
         updateTimer.Tick += async (_, _) => await CheckForUpdateAsync();
         updateTimer.Start();
@@ -694,25 +711,88 @@ public sealed class MainForm : Form
 
     private async Task CheckForUpdateAsync()
     {
+        if (updating) return;
         var u = await UpdateChecker.CheckAsync();
-        if (u is null || IsDisposed || u.Tag == updateHiddenFor) return;
+        if (u is null || IsDisposed || updating || u.Tag == updateHiddenFor) return;
 
-        var prefix = $"⬆  Version {u.Display} is available (you have {UpdateChecker.Short(UpdateChecker.Current)}).   ";
-        const string download = "Download", later = "Later";
-        lnkUpdate.Text = $"{prefix}{download}   ·   {later}";
-        lnkUpdate.Links.Clear();
-        lnkUpdate.Links.Add(prefix.Length, download.Length, u.Url);
-        lnkUpdate.Links.Add(prefix.Length + download.Length + 7, later.Length, "later");
-        lnkUpdate.Tag = u.Tag;
+        pendingUpdate = u;
+        ShowUpdateBar($"⬆  Version {u.Display} is available (you have {UpdateChecker.Short(UpdateChecker.Current)}).", Accent);
         pnlUpdate.Visible = true;
+
+        // For testing one-click updates (with BETTERSCANNER_PRETEND_VERSION): press "Update now" by itself.
+        if (Environment.GetEnvironmentVariable("BETTERSCANNER_TEST_AUTOUPDATE") == "1") _ = InstallUpdateAsync();
 
         if (settings.NotifiedUpdate != u.Tag) // one tray notification per new version
         {
             settings.NotifiedUpdate = u.Tag;
             settings.Save();
             Notify("Better Scanner update available",
-                $"Version {u.Display} is ready. Open Better Scanner and click Download.", ToolTipIcon.Info);
+                $"Version {u.Display} is ready. Open Better Scanner and click Update now.", ToolTipIcon.Info);
         }
+    }
+
+    /// <summary>
+    /// Fills the update bar: <paramref name="message"/>, then "Update now · Later"
+    /// (or "Download · Later" when this copy can't replace itself). No links while working.
+    /// </summary>
+    private void ShowUpdateBar(string message, Color color, bool links = true)
+    {
+        var u = pendingUpdate;
+        lnkUpdate.Links.Clear();
+        lnkUpdate.ForeColor = color;
+        lnkUpdate.Tag = u?.Tag;
+        if (!links || u is null)
+        {
+            lnkUpdate.Text = message;
+            return;
+        }
+
+        bool oneClick = u.AssetUrl is not null && SelfUpdater.CanUpdateInPlace();
+        string action = oneClick ? "Update now" : "Download", later = "Later", prefix = message + "   ";
+        lnkUpdate.Text = $"{prefix}{action}   ·   {later}";
+        lnkUpdate.Links.Add(prefix.Length, action.Length, oneClick ? "install" : u.Url);
+        lnkUpdate.Links.Add(prefix.Length + action.Length + 7, later.Length, "later");
+    }
+
+    /// <summary>
+    /// One-click update: download, check, swap the exe, restart. Never interrupts a scan,
+    /// and turns hands-free back on afterwards if it was on.
+    /// </summary>
+    private async Task InstallUpdateAsync()
+    {
+        if (updating || pendingUpdate is not { } u) return;
+        updating = true;
+        var blue = Color.FromArgb(0x0B, 0x4A, 0x9B);
+        try
+        {
+            ShowUpdateBar($"Downloading version {u.Display}…", blue, links: false);
+            var progress = new Progress<int>(p => ShowUpdateBar($"Downloading version {u.Display}…  {p}%", blue, links: false));
+            using (var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10)))
+                await SelfUpdater.DownloadAsync(u, progress, cts.Token);
+
+            // Don't cut off a stack that's being scanned: install as soon as it's done.
+            while (glassBusy || enginePhase is Phase.Settling or Phase.Scanning)
+            {
+                ShowUpdateBar($"Version {u.Display} is ready. Installing as soon as this scan finishes…", blue, links: false);
+                await Task.Delay(1000);
+                if (IsDisposed) return;
+            }
+
+            ShowUpdateBar($"Installing version {u.Display}…", blue, links: false);
+        }
+        catch (Exception ex)
+        {
+            updating = false;
+            var why = ex is OperationCanceledException ? "the download took too long" : ex.Message;
+            ShowUpdateBar($"Couldn't update ({why.TrimEnd('.')}). Try again:", Danger);
+            return;
+        }
+
+        // The new exe is downloaded. Close normally (stops hands-free, frees the printer for
+        // coworkers), then swap it in and start it from OnFormClosed.
+        restartAfterClose = true;
+        restartResume = engine.IsRunning;
+        ExitApp();
     }
 
     // ── Printers ────────────────────────────────────────────────────────────
@@ -1543,6 +1623,19 @@ public sealed class MainForm : Form
         tray.Visible = false;
         settings.Save();
         base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        base.OnFormClosed(e);
+        if (!restartAfterClose) return;
+        Program.ReleaseSingleInstance(); // so the new copy doesn't just hand over to this closing one
+        bool swapped = SelfUpdater.SwapAndLaunch(restartResume, out var error);
+        if (error is null) return;
+        MessageBox.Show(swapped
+                ? "Better Scanner was updated, but couldn't restart by itself.\n\nPlease open Better Scanner again."
+                : "Better Scanner couldn't install the update:\n" + error.Message + "\n\nOpen Better Scanner again to keep using the current version.",
+            "Better Scanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     protected override void Dispose(bool disposing)

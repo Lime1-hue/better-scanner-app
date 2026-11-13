@@ -17,7 +17,7 @@
     <RootNamespace>BetterScanner</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationVisualStyles>true</ApplicationVisualStyles>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Product>Better Scanner</Product>
     <Description>Hands-free network scanning for Epson (eSCL / AirScan) printers.</Description>
     <Authors>Emil Paladin</Authors>
@@ -36,6 +36,8 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="Microsoft.VisualBasic" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
 
 </Project>

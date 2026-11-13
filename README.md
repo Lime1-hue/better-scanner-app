@@ -36,7 +36,11 @@ Settings are stored in `%AppData%\BetterScanner\settings.json`.
 
 The app checks GitHub for a newer release when it opens and every 6 hours. It only reads public release info and sends nothing about the PC. When there's a new version, a blue bar appears at the top of the window and a tray notification pops up once.
 
-To update: click **Download**, then exit Better Scanner from the tray (right-click → **Exit**), replace the old exe with the new one, and open it again. Your settings stay.
+To update: click **Update now**. The app downloads the new version, checks it against GitHub's checksum, swaps it in for the old exe (same name and folder) and restarts. If hands-free was on, it comes back on. If a stack is being scanned, it waits for the scan to finish. Your settings stay.
+
+If the app can't write to its own folder (e.g. it's in Program Files), the bar shows **Download** instead: exit Better Scanner from the tray (right-click → **Exit**), replace the old exe with the new one, and open it again. Copies older than 1.0.4 also need this manual update one last time.
+
+Testing: `BETTERSCANNER_PRETEND_VERSION=1.0.2` makes a copy think it's older, and `BETTERSCANNER_TEST_AUTOUPDATE=1` makes it press **Update now** by itself. Use them with `BETTERSCANNER_PROFILE=test` so your real settings aren't touched.
 
 **Publishing a new version:** bump `<Version>` in `BetterScanner.csproj`, run `build.bat`, then create a release with a matching tag (e.g. `v1.0.2`) and attach `publish\BetterScanner.exe` plus a zip of `publish\Windows7\`. Copies of the app from 1.0.1 onward see it automatically.
 

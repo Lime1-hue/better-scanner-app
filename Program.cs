@@ -4,11 +4,33 @@ namespace BetterScanner;
 
 internal static class Program
 {
-    [STAThread]
-    private static void Main()
+    private static Mutex? instanceLock;
+
+    /// <summary>
+    /// Lets the updated copy start while this one finishes closing (call on the UI thread,
+    /// after the window has closed and the printer lock is released).
+    /// </summary>
+    public static void ReleaseSingleInstance()
     {
+        try { instanceLock?.ReleaseMutex(); } catch { }
+        instanceLock?.Dispose();
+        instanceLock = null;
+    }
+
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        bool updated = args.Contains("--updated"), resume = args.Contains("--resume");
+
         // Single instance: a second launch just brings the running window forward.
-        using var mutex = new Mutex(true, "BetterScanner.SingleInstance" + AppSettings.ProfileSuffix, out bool first);
+        var mutex = new Mutex(true, "BetterScanner.SingleInstance" + AppSettings.ProfileSuffix, out bool first);
+        if (!first && updated)
+        {
+            // Just updated: the old copy may still be closing. Wait for it instead of handing over to it.
+            try { first = mutex.WaitOne(TimeSpan.FromSeconds(30)); }
+            catch (AbandonedMutexException) { first = true; }
+        }
+        instanceLock = mutex;
         if (!first)
         {
             try
@@ -31,7 +53,8 @@ internal static class Program
 #else
         ApplicationConfiguration.Initialize();
 #endif
-        var form = new MainForm();
+        Updates.SelfUpdater.CleanUpInBackground(); // the previous version's .old file, after an update
+        var form = new MainForm(updated, resume);
 
         var listener = new Thread(() =>
         {
@@ -44,6 +67,7 @@ internal static class Program
         listener.Start();
 
         Application.Run(form);
+        ReleaseSingleInstance();
     }
 }
 

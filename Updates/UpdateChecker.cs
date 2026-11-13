@@ -1,10 +1,11 @@
 using System.Net.Http;
-using System.Text.RegularExpressions;
 
 namespace BetterScanner.Updates;
 
 /// <summary>A newer published release.</summary>
-public sealed record UpdateInfo(Version Version, string Tag, string Url)
+/// <param name="AssetUrl">Direct download of the file for this build (exe or Windows 7 zip); null if the release lacks it.</param>
+/// <param name="AssetSha256">GitHub's SHA-256 of that file (lowercase hex), when GitHub provides one.</param>
+public sealed record UpdateInfo(Version Version, string Tag, string Url, string? AssetUrl, string? AssetSha256)
 {
     public string Display => UpdateChecker.Short(Version);
 }
@@ -23,14 +24,19 @@ public static class UpdateChecker
 
     private static HttpClient CreateHttp()
     {
-#if NETFRAMEWORK
-        // GitHub requires TLS 1.2, which Windows 7 doesn't enable by default.
-        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
-#endif
+        EnableTls12();
         var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         h.DefaultRequestHeaders.UserAgent.ParseAdd("BetterScanner-UpdateCheck");
         h.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         return h;
+    }
+
+    /// <summary>GitHub requires TLS 1.2, which Windows 7 doesn't enable by default.</summary>
+    internal static void EnableTls12()
+    {
+#if NETFRAMEWORK
+        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+#endif
     }
 
     /// <summary>This app's version (from &lt;Version&gt; in the .csproj).</summary>
@@ -54,11 +60,17 @@ public static class UpdateChecker
         try
         {
             var json = await Http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases/latest").ConfigureAwait(false);
-            var tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
-            var url = Regex.Match(json, "\"html_url\"\\s*:\\s*\"([^\"]+/releases/tag/[^\"]+)\"").Groups[1].Value;
+            var r = Json.Deserialize<GhRelease>(json);
+            var tag = r?.tag_name ?? "";
             if (!Version.TryParse(tag.TrimStart('v', 'V'), out var latest)) return null;
             if (Normalize(latest) <= Normalize(current)) return null;
-            return new UpdateInfo(latest, tag, url.Length > 0 ? url : LatestPage);
+
+            var asset = r!.assets?.FirstOrDefault(a => string.Equals(a.name, SelfUpdater.AssetName, StringComparison.OrdinalIgnoreCase));
+            string? sha = asset?.digest is { } d && d.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                ? d.Substring(7).ToLowerInvariant()
+                : null;
+            var page = r.html_url is { Length: > 0 } u && u.Contains("/releases/tag/") ? u : LatestPage;
+            return new UpdateInfo(latest, tag, page, asset?.browser_download_url, sha);
         }
         catch
         {
@@ -68,4 +80,21 @@ public static class UpdateChecker
 
     private static Version Normalize(Version v) =>
         new(v.Major, v.Minor, Math.Max(0, v.Build), Math.Max(0, v.Revision));
+
+    // Shapes of GitHub's JSON. Property names match the JSON exactly (both JSON libraries map by name).
+#pragma warning disable IDE1006
+    private sealed class GhRelease
+    {
+        public string? tag_name { get; set; }
+        public string? html_url { get; set; }
+        public List<GhAsset>? assets { get; set; }
+    }
+
+    private sealed class GhAsset
+    {
+        public string? name { get; set; }
+        public string? browser_download_url { get; set; }
+        public string? digest { get; set; }
+    }
+#pragma warning restore IDE1006
 }
