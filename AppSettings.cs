@@ -23,6 +23,8 @@ public sealed class AppSettings
     public int IdleStopMinutes { get; set; } = 10;
     /// <summary>Shown to coworkers while you're using a printer. Empty = Windows user name.</summary>
     public string DisplayName { get; set; } = "";
+    /// <summary>Last release tag we showed a tray notification for (one notification per version).</summary>
+    public string NotifiedUpdate { get; set; } = "";
 
     public bool AutoStartHandsFree { get; set; }
     public bool CloseToTray { get; set; } = true;

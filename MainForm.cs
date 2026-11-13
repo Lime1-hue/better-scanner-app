@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using BetterScanner.Coordination;
 using BetterScanner.Escl;
 using BetterScanner.Scanning;
+using BetterScanner.Updates;
 
 namespace BetterScanner;
 
@@ -31,6 +32,20 @@ public sealed class MainForm : Form
     private PrinterClaim? shownClaim;      // colleague holding the selected printer (shown in the UI)
     private string? notifyFreeFor;         // printer id to announce when it becomes free
     private string? stopNote;              // reason to show when we stop the engine ourselves
+    private string? updateHiddenFor;       // release tag the user clicked "Later" on (this session only)
+
+    private readonly Panel pnlUpdate = new()
+    {
+        Dock = DockStyle.Fill, Height = 40, Visible = false, BackColor = Color.FromArgb(0xE8, 0xF1, 0xFD),
+        Padding = new Padding(12, 0, 8, 0), Margin = new Padding(0, 6, 0, 4),
+    };
+    private readonly LinkLabel lnkUpdate = new()
+    {
+        Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(0x0B, 0x4A, 0x9B),
+        LinkColor = Color.FromArgb(0x0B, 0x5C, 0xD6), ActiveLinkColor = Color.FromArgb(0x0B, 0x5C, 0xD6),
+        LinkBehavior = LinkBehavior.HoverUnderline, Font = new Font("Segoe UI Semibold", 9.75f),
+    };
+    private readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 6 * 60 * 60 * 1000 }; // every 6 hours
     private static readonly Color Amber = Color.FromArgb(0x9A, 0x5B, 0x00);
 
     private readonly ComboBox cboScanner = Combo();
@@ -149,6 +164,18 @@ public sealed class MainForm : Form
             root.RowStyles.Add(new RowStyle(size, height));
             root.Controls.Add(c, 0, root.RowCount++);
         }
+
+        pnlUpdate.Controls.Add(lnkUpdate);
+        lnkUpdate.LinkClicked += (_, e) =>
+        {
+            if (e.Link?.LinkData is string url) OpenUrl(url);
+            else if (e.Link?.LinkData is "later")
+            {
+                updateHiddenFor = lnkUpdate.Tag as string;
+                pnlUpdate.Visible = false;
+            }
+        };
+        Add(pnlUpdate); // "new version available" bar, hidden until there is one
 
         Add(Heading("Printer"));
         Add(Row(cboScanner, btnRefresh, btnAddIp));
@@ -464,6 +491,35 @@ public sealed class MainForm : Form
         await RefreshPrinterStatusAsync();
         await DiscoverAsync(userInitiated: false);
         if (settings.AutoStartHandsFree && !engine.IsRunning && SelectedScanner is not null) StartHandsFree();
+
+        updateTimer.Tick += async (_, _) => await CheckForUpdateAsync();
+        updateTimer.Start();
+        await CheckForUpdateAsync();
+    }
+
+    // ── Update check ────────────────────────────────────────────────────────
+
+    private async Task CheckForUpdateAsync()
+    {
+        var u = await UpdateChecker.CheckAsync();
+        if (u is null || IsDisposed || u.Tag == updateHiddenFor) return;
+
+        var prefix = $"⬆  Version {u.Display} is available (you have {UpdateChecker.Short(UpdateChecker.Current)}).   ";
+        const string download = "Download", later = "Later";
+        lnkUpdate.Text = $"{prefix}{download}   ·   {later}";
+        lnkUpdate.Links.Clear();
+        lnkUpdate.Links.Add(prefix.Length, download.Length, u.Url);
+        lnkUpdate.Links.Add(prefix.Length + download.Length + 7, later.Length, "later");
+        lnkUpdate.Tag = u.Tag;
+        pnlUpdate.Visible = true;
+
+        if (settings.NotifiedUpdate != u.Tag) // one tray notification per new version
+        {
+            settings.NotifiedUpdate = u.Tag;
+            settings.Save();
+            Notify("Better Scanner update available",
+                $"Version {u.Display} is ready. Open Better Scanner and click Download.", ToolTipIcon.Info);
+        }
     }
 
     // ── Printers ────────────────────────────────────────────────────────────
@@ -1095,6 +1151,7 @@ public sealed class MainForm : Form
         locks.Dispose(); // tells coworkers the printer is free right away
         Native.KeepAwake(false);
         statusTimer.Stop();
+        updateTimer.Stop();
         tray.Visible = false;
         settings.Save();
         base.OnFormClosing(e);
@@ -1106,6 +1163,7 @@ public sealed class MainForm : Form
         {
             tray.Dispose();
             statusTimer.Dispose();
+            updateTimer.Dispose();
         }
         base.Dispose(disposing);
     }

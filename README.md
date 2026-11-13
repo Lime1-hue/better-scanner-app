@@ -32,6 +32,14 @@ It doesn't use Epson Scan 2 or any driver. It talks to the printer directly over
 
 Settings are stored in `%AppData%\BetterScanner\settings.json`.
 
+## Updates
+
+The app checks GitHub for a newer release when it opens and every 6 hours. It only reads public release info and sends nothing about the PC. When there's a new version, a blue bar appears at the top of the window and a tray notification pops up once.
+
+To update: click **Download**, then exit Better Scanner from the tray (right-click → **Exit**), replace the old exe with the new one, and open it again. Your settings stay.
+
+**Publishing a new version:** bump `<Version>` in `BetterScanner.csproj`, run `build.bat`, then create a release with a matching tag (e.g. `v1.0.2`) and attach `publish\BetterScanner.exe` plus a zip of `publish\Windows7\`. Copies of the app from 1.0.1 onward see it automatically.
+
 ## Build
 
 You need the .NET 10 SDK.
