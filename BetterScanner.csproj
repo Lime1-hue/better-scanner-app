@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Two builds from the same source:
+      net10.0-windows → Windows 10/11 (single self-contained exe, see build.bat)
+      net48           → Windows 7 SP1 and later (needs .NET Framework 4.8 installed)
+    Framework differences live in Compat.cs and a few #if NETFRAMEWORK blocks.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFrameworks>net10.0-windows;net48</TargetFrameworks>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BetterScanner</AssemblyName>
+    <RootNamespace>BetterScanner</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <Version>1.0.0</Version>
+    <Product>Better Scanner</Product>
+    <Description>Hands-free network scanning for Epson (eSCL / AirScan) printers.</Description>
+    <Authors>Emil Paladin</Authors>
+    <Company>Emil Paladin (Lime1-hue)</Company>
+    <Copyright>© 2026 Emil Paladin · paladinemil947@gmail.com</Copyright>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- app.ico = normal, app-armed.ico = green tray icon while hands-free is on -->
+    <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+    <EmbeddedResource Include="app-armed.ico" LogicalName="app-armed.ico" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="Microsoft.VisualBasic" />
+  </ItemGroup>
+
+</Project>
