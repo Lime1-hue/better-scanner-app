@@ -82,6 +82,15 @@ public sealed class MainForm : Form
     private readonly CheckBox chkDuplex = Check("Both sides (duplex)");
     private readonly CheckBox chkSkipBlank = Check("Skip blank pages");
 
+    // Small-screen handling (see ApplyResponsive)
+    private TableLayoutPanel root = null!, settingsGrid = null!;
+    private LinkLabel credit = null!;
+    private RowStyle buttonsRow = null!;
+    private readonly List<Label> headings = new();
+    private (Control? Label, Control Field)[] settingsCells = [];
+    private bool? compact, narrow;
+    private bool scrollMinPending;
+
     private readonly Panel pnlStatus = new() { Dock = DockStyle.Fill, Height = 150, Padding = new Padding(16, 12, 16, 10), Margin = new Padding(0, 12, 0, 10) };
     private readonly Label lblTitle = new() { Dock = DockStyle.Top, Height = 36, Font = new Font("Segoe UI Semibold", 15f), AutoEllipsis = true };
     private readonly Label lblDetail = new() { Dock = DockStyle.Fill, AutoEllipsis = true };
@@ -139,10 +148,12 @@ public sealed class MainForm : Form
         LinkBehavior = LinkBehavior.HoverUnderline, Font = new Font("Segoe UI Semibold", 9.75f),
     };
 
-    private static Label Heading(string text) => new()
+    private Label Heading(string text)
     {
-        Text = text, AutoSize = true, Font = new Font("Segoe UI Semibold", 10.5f), Margin = new Padding(0, 8, 0, 4),
-    };
+        var h = new Label { Text = text, AutoSize = true, Font = new Font("Segoe UI Semibold", 10.5f), Margin = new Padding(0, 8, 0, 4) };
+        headings.Add(h);
+        return h;
+    }
 
     private static TableLayoutPanel Row(Control fill, params Control[] rest)
     {
@@ -167,10 +178,11 @@ public sealed class MainForm : Form
         BackColor = Color.White;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(660, 820);
-        MinimumSize = new Size(580, 700);
+        MinimumSize = new Size(460, 420); // short screens scroll instead (see UpdateScrollMin)
+        AutoScroll = true;
         Icon = iconIdle;
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(18, 10, 18, 10) };
+        root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(18, 10, 18, 10) };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         void Add(Control c, SizeType size = SizeType.AutoSize, float height = 0)
         {
@@ -206,28 +218,19 @@ public sealed class MainForm : Form
         Add(nameRow);
 
         Add(Heading("Scan settings"));
-        var grid = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 4, Margin = new Padding(0) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        grid.Controls.Add(Lbl("Color"), 0, 0);
-        grid.Controls.Add(cboColor, 1, 0);
-        grid.Controls.Add(Lbl("Resolution"), 2, 0);
-        grid.Controls.Add(cboRes, 3, 0);
-        grid.Controls.Add(Lbl("Page size"), 0, 1);
-        grid.Controls.Add(cboPage, 1, 1);
-        grid.Controls.Add(Lbl("Save as"), 2, 1);
-        grid.Controls.Add(cboSplit, 3, 1);
+        // Laid out in four columns, or two on narrow windows (see LayoutSettingsGrid).
+        settingsGrid = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0) };
         var idleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0), Anchor = AnchorStyles.Left, WrapContents = false };
         idleRow.Controls.AddRange([numIdle, Lbl("min with no paper")]);
-        grid.Controls.Add(chkDuplex, 1, 2);
-        grid.Controls.Add(Lbl("Auto-stop after"), 2, 2);
-        grid.Controls.Add(idleRow, 3, 2);
-        grid.Controls.Add(chkSkipBlank, 1, 3);
-        grid.Controls.Add(lblPagesPerFile, 2, 3);
-        grid.Controls.Add(numPages, 3, 3);
-        Add(grid);
+        settingsCells =
+        [
+            (Lbl("Color"), cboColor), (Lbl("Resolution"), cboRes),
+            (Lbl("Page size"), cboPage), (Lbl("Save as"), cboSplit),
+            (null, chkDuplex), (Lbl("Auto-stop after"), idleRow),
+            (null, chkSkipBlank), (lblPagesPerFile, numPages),
+        ];
+        LayoutSettingsGrid(narrowLayout: false);
+        Add(settingsGrid);
 
         pnlLinks.Controls.AddRange([lnkOther, lnkNotify, lnkAsk]);
         pnlStatus.Controls.Add(lblDetail);  // Fill is docked last, so add it first
@@ -243,6 +246,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(btnGlass, 1, 0);
         btnStart.FlatAppearance.BorderSize = 0;
         Add(buttons, SizeType.Absolute, 62);
+        buttonsRow = root.RowStyles[root.RowStyles.Count - 1];
 
         Add(Heading("Recent scans  (double-click to open · F2 to rename)"));
         lvRecent.Columns.Add("File", 330);
@@ -257,7 +261,7 @@ public sealed class MainForm : Form
         // Footer credit: name → GitHub repo, email → new email.
         const string name = "Emil Paladin (Lime1-hue)", email = "paladinemil947@gmail.com";
         var prefix = $"Better Scanner v{Application.ProductVersion.Split('+')[0]}  ·  Made by ";
-        var credit = new LinkLabel
+        credit = new LinkLabel
         {
             AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(0, 6, 0, 0),
             ForeColor = Muted, LinkColor = Accent, ActiveLinkColor = Accent, LinkBehavior = LinkBehavior.HoverUnderline,
@@ -270,6 +274,15 @@ public sealed class MainForm : Form
         Add(credit);
 
         Controls.Add(root);
+        // Measure after the layout pass has finished, not in the middle of it.
+        root.Layout += (_, _) =>
+        {
+            if (scrollMinPending || !IsHandleCreated) return;
+            scrollMinPending = true;
+            BeginInvoke((Action)(() => { scrollMinPending = false; UpdateScrollMin(); }));
+        };
+        root.SizeChanged += (_, _) => FitToWidth();
+        lvRecent.Resize += (_, _) => FitToWidth();
 
         // Recent list context menu
         var menu = new ContextMenuStrip();
@@ -295,6 +308,120 @@ public sealed class MainForm : Form
         tray.DoubleClick += (_, _) => ShowFromTray();
 
         ResumeLayout(true);
+    }
+
+    private int Px(int logical) => (int)Math.Round(logical * DeviceDpi / 96f);
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e); // DPI scaling has been applied by now
+        FitToScreen();
+    }
+
+    /// <summary>Small screens (1366×768 laptops, 1024×768, 125% scaling): never open hanging off the desktop.</summary>
+    private void FitToScreen()
+    {
+        var area = Screen.FromControl(this).WorkingArea;
+        Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+        Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (area.Height - Height) / 2);
+        ApplyResponsive();
+    }
+
+    protected override void OnClientSizeChanged(EventArgs e)
+    {
+        base.OnClientSizeChanged(e);
+        if (root is not null && IsHandleCreated) ApplyResponsive();
+    }
+
+    /// <summary>
+    /// Short window → tighter spacing so everything still fits a 768-pixel-tall screen.
+    /// Narrow window → scan settings stack in one label/field column instead of clipping.
+    /// </summary>
+    private void ApplyResponsive()
+    {
+        if (WindowState == FormWindowState.Minimized) return;
+        bool c = ClientSize.Height < Px(800);
+        bool n = ClientSize.Width < Px(600);
+        if (c == compact && n == narrow) return;
+
+        SuspendLayout();
+        if (c != compact)
+        {
+            compact = c;
+            pnlStatus.Height = Px(c ? 104 : 150);
+            pnlStatus.Padding = c ? new Padding(Px(14), Px(6), Px(14), Px(6)) : new Padding(Px(16), Px(12), Px(16), Px(10));
+            pnlStatus.Margin = c ? new Padding(0, Px(6), 0, Px(6)) : new Padding(0, Px(12), 0, Px(10));
+            lblTitle.Height = Px(c ? 30 : 36);
+            buttonsRow.Height = Px(c ? 50 : 62);
+            foreach (var h in headings) h.Margin = c ? new Padding(0, Px(4), 0, Px(2)) : new Padding(0, Px(8), 0, Px(4));
+        }
+        if (n != narrow)
+        {
+            narrow = n;
+            LayoutSettingsGrid(n);
+        }
+        ResumeLayout(true);
+    }
+
+    /// <summary>Four columns (label, field, label, field) normally; two on narrow windows.</summary>
+    private void LayoutSettingsGrid(bool narrowLayout)
+    {
+        var g = settingsGrid;
+        g.SuspendLayout();
+        g.Controls.Clear();
+        g.ColumnStyles.Clear();
+        g.RowStyles.Clear();
+        int pairs = narrowLayout ? 1 : 2;
+        g.ColumnCount = pairs * 2;
+        for (int i = 0; i < pairs; i++)
+        {
+            g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            g.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / pairs));
+        }
+
+        // Narrow: labelled settings first, then the checkboxes together at the bottom.
+        var cells = narrowLayout
+            ? settingsCells.Where(x => x.Label is not null).Concat(settingsCells.Where(x => x.Label is null)).ToArray()
+            : settingsCells;
+        g.RowCount = (cells.Length + pairs - 1) / pairs;
+        for (int i = 0; i < cells.Length; i++)
+        {
+            int row = i / pairs, col = i % pairs * 2;
+            if (cells[i].Label is { } l) g.Controls.Add(l, col, row);
+            g.Controls.Add(cells[i].Field, col + 1, row);
+        }
+        g.ResumeLayout(true);
+    }
+
+    /// <summary>
+    /// If the window is shorter than the controls need, scroll rather than squash:
+    /// everything except the recent list keeps its height, and the list keeps a few rows.
+    /// </summary>
+    private void UpdateScrollMin()
+    {
+        int h = root.Padding.Vertical + Px(compact == true ? 80 : 110);
+        foreach (Control c in root.Controls)
+        {
+            if (c != lvRecent && c.Visible) h += c.Height + c.Margin.Vertical;
+        }
+        var min = new Size(0, h);
+        if (AutoScrollMinSize != min) AutoScrollMinSize = min;
+    }
+
+    /// <summary>Wraps long one-line labels and stretches the File column on narrow windows.</summary>
+    private void FitToWidth()
+    {
+        int w = root.ClientSize.Width - root.Padding.Horizontal;
+        if (w > 0)
+        {
+            var max = new Size(w, 0);
+            if (credit.MaximumSize != max) credit.MaximumSize = max;
+        }
+        if (lvRecent.Columns.Count == 3)
+        {
+            int file = lvRecent.ClientSize.Width - lvRecent.Columns[1].Width - lvRecent.Columns[2].Width;
+            if (file > Px(120) && lvRecent.Columns[0].Width != file) lvRecent.Columns[0].Width = file;
+        }
     }
 
     /// <summary>Loads an embedded .ico; <paramref name="small"/> picks the tray-sized frame.</summary>
