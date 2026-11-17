@@ -20,7 +20,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        bool updated = args.Contains("--updated"), resume = args.Contains("--resume");
+        bool updated = args.Contains("--updated"), resume = args.Contains("--resume"), startInTray = args.Contains("--tray");
 
         // Single instance: a second launch just brings the running window forward.
         var mutex = new Mutex(true, "BetterScanner.SingleInstance" + AppSettings.ProfileSuffix, out bool first);
@@ -54,7 +54,8 @@ internal static class Program
         ApplicationConfiguration.Initialize();
 #endif
         Updates.SelfUpdater.CleanUpInBackground(); // the previous version's .old file, after an update
-        var form = new MainForm(updated, resume);
+        Updates.SelfUpdater.SyncInstalledVersion(); // keeps Settings → Apps showing the right version after an update
+        var form = new MainForm(updated, resume, startInTray);
 
         var listener = new Thread(() =>
         {

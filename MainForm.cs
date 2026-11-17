@@ -120,6 +120,7 @@ public sealed class MainForm : Form
     private readonly CheckBox chkTray = Check("Keep running in the tray when closed");
 
     private readonly NotifyIcon tray = new();
+    private readonly bool startInTray;
     private readonly ToolStripMenuItem trayToggle = new("Start hands-free scanning");
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 4000 };
     private readonly Icon iconIdle = LoadIcon("app.ico"), iconArmed = LoadIcon("app-armed.ico");
@@ -127,10 +128,13 @@ public sealed class MainForm : Form
 
     /// <param name="justUpdated">Started by the previous version right after a one-click update.</param>
     /// <param name="resumeHandsFree">Hands-free was on before that update: turn it back on.</param>
-    public MainForm(bool justUpdated = false, bool resumeHandsFree = false)
+    /// <param name="startInTray">Started with Windows (--tray): run from the tray icon without opening the window.</param>
+    public MainForm(bool justUpdated = false, bool resumeHandsFree = false, bool startInTray = false)
     {
         this.justUpdated = justUpdated;
         this.resumeHandsFree = resumeHandsFree;
+        this.startInTray = startInTray;
+        if (startInTray) Opacity = 0; // shown invisibly so startup runs as usual, then hidden in OnShown
         BuildLayout();
         Native.SetPlaceholder(txtName, Environment.UserName);
         LoadSettingsIntoControls();
@@ -686,6 +690,11 @@ public sealed class MainForm : Form
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        if (startInTray)
+        {
+            Hide();
+            Opacity = 1;
+        }
         LoadRecent();
         statusTimer.Start();
         if (!locks.Available)

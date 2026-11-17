@@ -20,6 +20,18 @@ It doesn't use Epson Scan 2 or any driver. It talks to the printer directly over
 3. **Page sizing.** The printer scans its whole area and the app trims the empty background in software (auto-crop). It can also fit pages to A4 / Short / Long / Legal, or leave them uncropped.
 4. **PDF.** Pages are written straight into a PDF with no extra libraries. Black & white mode produces tiny 1-bit PDFs, about 2 KB a page for text.
 
+## Installing
+
+Download **`BetterScannerSetup.exe`** from the [latest release](https://github.com/Lime1-hue/better-scanner-app/releases/latest) and run it. No admin rights needed. One setup file works on every PC: it picks the Windows 10/11 build or the Windows 7 build by itself.
+
+- It installs to `%LocalAppData%\Programs\Better Scanner` and adds a Start menu shortcut.
+- **Start Better Scanner when I sign in** (ticked by default) starts it quietly in the tray at sign-in, ready for hands-free.
+- Windows may show "Windows protected your PC" because the file isn't code-signed. Click **More info → Run anyway**.
+- On Windows 7, setup checks for .NET Framework 4.8 and opens the download page if it's missing.
+- Already using a copied `BetterScanner.exe`? Exit it from the tray, delete it, then install.
+
+**Uninstalling:** Settings → Apps → **Better Scanner** → Uninstall (Windows 7: Control Panel → Programs and Features). Exit the app from the tray first. The uninstaller asks whether to delete your settings too. Your scanned PDFs are never touched.
+
 ## Using it
 
 - **Printer:** pick one from the list. "Find printers" searches again, and "Add by IP…" adds a printer by its IP.
@@ -42,18 +54,18 @@ If the app can't write to its own folder (e.g. it's in Program Files), the bar s
 
 Testing: `BETTERSCANNER_PRETEND_VERSION=1.0.2` makes a copy think it's older, and `BETTERSCANNER_TEST_AUTOUPDATE=1` makes it press **Update now** by itself. Use them with `BETTERSCANNER_PROFILE=test` so your real settings aren't touched.
 
-**Publishing a new version:** bump `<Version>` in `BetterScanner.csproj`, run `build.bat`, then create a release with a matching tag (e.g. `v1.0.2`) and attach `publish\BetterScanner.exe` plus a zip of `publish\Windows7\`. Copies of the app from 1.0.1 onward see it automatically.
+**Publishing a new version:** bump `<Version>` in `BetterScanner.csproj`, run `build.bat`, then create a release with a matching tag (e.g. `v1.0.2`) and attach `publish\release\BetterScannerSetup.exe` (for new installs), `publish\BetterScanner.exe` plus a zip of `publish\Windows7\` named `BetterScanner-Windows7.zip` (both used by **Update now**). Copies of the app from 1.0.1 onward see it automatically. Installed copies update the same way, and the version in Settings → Apps follows along.
 
 ## Build
 
-You need the .NET 10 SDK.
+You need the .NET 10 SDK, and [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer (`winget install JRSoftware.InnoSetup`).
 
 ```
 dotnet run -f net10.0-windows   # run from source
-build.bat                       # builds both versions into publish\
+build.bat                       # builds both versions + the installer into publish\
 ```
 
-`build.bat` produces two versions from the same code:
+The installer script is `installer\BetterScanner.iss`. It bundles both versions below into `publish\release\BetterScannerSetup.exe` (about 45 MB). `build.bat` produces two versions from the same code:
 
 | PC | What to copy | Needs |
 |---|---|---|

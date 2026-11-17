@@ -207,6 +207,31 @@ public static class SelfUpdater
         t.Start();
     }
 
+    /// <summary>The installer's entry in Settings → Apps (Inno Setup, per-user). Must match AppId in installer\BetterScanner.iss.</summary>
+    private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3C2A71-5B9E-4D6A-9C1F-2E7B4A6D3F10}_is1";
+
+    /// <summary>
+    /// One-click updates replace the exe without running the installer, so the version shown in
+    /// Settings → Apps would stay at the installed one. Fix it up when this copy is the installed one.
+    /// </summary>
+    public static void SyncInstalledVersion()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(UninstallKey, writable: true);
+            if (key?.GetValue("InstallLocation") is not string dir) return;
+            var installed = Path.GetFullPath(dir).TrimEnd('\\');
+            var mine = Path.GetDirectoryName(Path.GetFullPath(ExePath))!.TrimEnd('\\');
+            if (!installed.Equals(mine, StringComparison.OrdinalIgnoreCase)) return;
+            var version = UpdateChecker.Short(UpdateChecker.Current);
+            if (key.GetValue("DisplayVersion") as string != version) key.SetValue("DisplayVersion", version);
+        }
+        catch
+        {
+            // cosmetic only
+        }
+    }
+
     private static bool TryDelete(string path)
     {
         try
